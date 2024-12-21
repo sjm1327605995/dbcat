@@ -6,6 +6,18 @@ export function CreateConnection(arg1) {
   return window['go']['main']['App']['CreateConnection'](arg1);
 }
 
+export function CreateDatabase(arg1, arg2) {
+  return window['go']['main']['App']['CreateDatabase'](arg1, arg2);
+}
+
+export function ExecuteQuery(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ExecuteQuery'](arg1, arg2, arg3);
+}
+
+export function GetDatabaseCharsets(arg1) {
+  return window['go']['main']['App']['GetDatabaseCharsets'](arg1);
+}
+
 export function GetDatabases(arg1) {
   return window['go']['main']['App']['GetDatabases'](arg1);
 }
@@ -16,6 +28,10 @@ export function GetSchemas(arg1, arg2) {
 
 export function GetTableData(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['GetTableData'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function GetTableRowCount(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetTableRowCount'](arg1, arg2, arg3);
 }
 
 export function GetTableStructure(arg1, arg2, arg3) {

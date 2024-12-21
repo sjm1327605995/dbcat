@@ -1,10 +1,6 @@
 <template>
   <el-aside class="sidebar" :style="{ width: sidebarWidth }">
-    <!-- <SidebarToolbar
-      v-model:treeData="treeData"
-      @newGroup="handleContextMenuCommand('newGroup')"
-      @newConnection="handleContextMenuCommand('newConnection')"
-    /> -->
+    <!-- 移除顶部菜单栏 -->
     <div class="resize-bar" @mousedown="handleMousedown"></div>
     <div 
       class="tree-container" 
@@ -89,17 +85,38 @@
 
     <!-- 右键菜单 -->
     <ul v-show="contextMenuVisible" :style="contextMenuStyle" class="context-menu">
+      <!-- 组节点菜单 -->
       <template v-if="selectedNode?.type === 'group'">
         <li @click="handleContextMenuCommand('newGroup')">新建组</li>
         <li @click="handleContextMenuCommand('newConnection')">新建连接</li>
         <li @click="handleContextMenuCommand('rename')">重命名</li>
         <li @click="handleContextMenuCommand('delete')">删除</li>
       </template>
+
+      <!-- 连接节点菜单 -->
       <template v-else-if="selectedNode?.type === 'connection'">
         <li @click="handleContextMenuCommand('refresh')">刷新</li>
+        <li @click="handleContextMenuCommand('edit')">编辑连接</li>
         <li @click="handleContextMenuCommand('rename')">重命名</li>
         <li @click="handleContextMenuCommand('delete')">删除</li>
       </template>
+
+      <!-- 数据库节点菜单 -->
+      <template v-else-if="selectedNode?.type === 'database'">
+        <li @click="handleContextMenuCommand('refresh')">刷新</li>
+        <li @click="handleContextMenuCommand('export')">导出数据库</li>
+        <li @click="handleContextMenuCommand('delete')">删除数据库</li>
+      </template>
+
+      <!-- 表节点菜单 -->
+      <template v-else-if="selectedNode?.type === 'table'">
+        <li @click="handleContextMenuCommand('refresh')">刷新</li>
+        <li @click="handleContextMenuCommand('export')">导出表</li>
+        <li @click="handleContextMenuCommand('truncate')">清空表</li>
+        <li @click="handleContextMenuCommand('delete')">删除表</li>
+      </template>
+
+      <!-- 空白区域菜单（根级别） -->
       <template v-else>
         <li @click="handleContextMenuCommand('newGroup')">新建组</li>
         <li @click="handleContextMenuCommand('newConnection')">新建连接</li>
@@ -113,13 +130,15 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CreateConnection, GetDatabases, GetSchemas, GetTables, TestConnection } from '../../wailsjs/go/main/App'
 import type { DatabaseConfig, ConnectionFormData } from '../types/database'
+import type { TreeNodeData, DragNode, TableInfo } from '../types/tree'
 import { StorageManager } from '../utils/storage'
 // import SidebarToolbar from './SidebarToolbar.vue'
 import TreeNodeContent from './TreeNodeContent.vue'
-import type { TreeNodeData, DragNode } from '../types/tree'
 
 const emit = defineEmits<{
-  (e: 'select-table', data: { config: DatabaseConfig, database: string, table: string }): void
+  (e: 'select-table', data: { config: DatabaseConfig; database: string; table: string }): void
+  (e: 'new-query', data: { config: DatabaseConfig; database: string }): void
+  (e: 'connection-select', connection: TreeNodeData): void
 }>()
 
 const treeRef = ref()
@@ -148,6 +167,7 @@ const connectionForm = ref<ConnectionFormData>({
 })
 
 const selectedNode = ref<TreeNodeData | null>(null)
+const selectedConnection = ref<TreeNodeData | null>(null)
 const storageManager = StorageManager.getInstance()
 const treeData = ref<TreeNodeData[]>([])
 
@@ -249,13 +269,30 @@ const loadTables = async (node: TreeNodeData, parentNode: TreeNodeData) => {
       }
     }
     const dbIndex = parentNode.cache.databases.findIndex(db => db.Name === node.label)
+    
+    const processedTables: TableInfo[] = tables.map(t => {
+      const tableInfo: TableInfo = {
+        Name: t.Name,
+        Comment: t.Comment || ''
+      }
+
+      if ('Type' in t && typeof t.Type === 'string') {
+        tableInfo.Type = t.Type
+      }
+      if ('IsPrimary' in t && typeof t.IsPrimary === 'boolean') {
+        tableInfo.IsPrimary = t.IsPrimary
+      }
+
+      return tableInfo
+    })
+    
     if (dbIndex === -1) {
       parentNode.cache.databases.push({
         Name: node.label,
-        Tables: tables
+        Tables: processedTables
       })
     } else {
-      parentNode.cache.databases[dbIndex].Tables = tables
+      parentNode.cache.databases[dbIndex].Tables = processedTables
     }
     saveTreeData()
   } catch (error) {
@@ -267,11 +304,22 @@ const loadTables = async (node: TreeNodeData, parentNode: TreeNodeData) => {
 const handleNodeClick = async (data: TreeNodeData) => {
   selectedNode.value = data
   if (data.type === 'connection') {
+    selectedConnection.value = data
+    emit('connection-select', data)
     await loadDatabases(data)
   } else if (data.type === 'database') {
     const parentNode = findParentNodeById(treeData.value, data.id)
     if (parentNode) {
+      selectedConnection.value = parentNode
+      emit('connection-select', parentNode)
       await loadTables(data, parentNode)
+      
+      if (parentNode.config) {
+        emit('new-query', {
+          config: parentNode.config,
+          database: data.label
+        })
+      }
     }
   } else if (data.type === 'table') {
     const parts = data.id.split('-')
@@ -320,57 +368,81 @@ const handleContextMenu = (event: MouseEvent, data: TreeNodeData) => {
 
 // 处理右键菜单命令
 const handleContextMenuCommand = async (command: string) => {
-  if (command === 'newGroup') {
-    dialogType.value = 'name'
-    dialogTitle.value = '新建组'
-    form.value.name = ''
-    dialogVisible.value = true
-  } else if (command === 'newConnection') {
-    dialogType.value = 'connection'
-    dialogTitle.value = '新建连接'
-    connectionForm.value = {
-      type: 'mysql',
-      host: 'localhost',
-      port: 3306,
-      user: '',
-      password: '',
-      database: '',
-      sslMode: 'disable'
-    }
-    dialogVisible.value = true
-  } else if (command === 'rename' && selectedNode.value) {
-    dialogType.value = 'name'
-    dialogTitle.value = '重命名'
-    form.value.name = selectedNode.value.label
-    dialogVisible.value = true
-  } else if (command === 'delete' && selectedNode.value) {
-    ElMessageBox.confirm(
-      `确定要删除 ${selectedNode.value.label} 吗？`,
-      '警告',
-      {
-        confirmButtonText: '确��',
-        cancelButtonText: '取消',
-        type: 'warning',
+  switch (command) {
+    case 'newGroup':
+      dialogType.value = 'name'
+      dialogTitle.value = '新建组'
+      form.value.name = ''
+      dialogVisible.value = true
+      break
+
+    case 'newConnection':
+      dialogType.value = 'connection'
+      dialogTitle.value = '新建连接'
+      connectionForm.value = {
+        type: 'mysql',
+        host: 'localhost',
+        port: 3306,
+        user: '',
+        password: '',
+        database: '',
+        sslMode: 'disable'
       }
-    ).then(() => {
-      if (treeData.value) {
-        deleteFromNodes(treeData.value)
-        saveTreeData()
-        ElMessage.success('删除成功')
+      dialogVisible.value = true
+      break
+
+    case 'refresh':
+      if (selectedNode.value?.type === 'connection') {
+        await loadDatabases(selectedNode.value)
+      } else if (selectedNode.value?.type === 'database') {
+        const parentNode = findParentNodeById(treeData.value, selectedNode.value.id)
+        if (parentNode) {
+          await loadTables(selectedNode.value, parentNode)
+        }
       }
-    }).catch(() => {
-      // 取消删除
-    })
-  } else if (command === 'refresh' && selectedNode.value) {
-    if (selectedNode.value.type === 'connection') {
-      await loadDatabases(selectedNode.value)
-    } else if (selectedNode.value.type === 'database') {
-      const parentNode = findParentNodeById(treeData.value, selectedNode.value.id)
-      if (parentNode) {
-        await loadTables(selectedNode.value, parentNode)
+      break
+
+    case 'rename':
+      if (selectedNode.value) {
+        dialogType.value = 'name'
+        dialogTitle.value = '重命名'
+        form.value.name = selectedNode.value.label
+        dialogVisible.value = true
       }
-    }
+      break
+
+    case 'delete':
+      if (selectedNode.value) {
+        ElMessageBox.confirm(
+          `确定要删除 ${selectedNode.value.label} 吗？`,
+          '警告',
+          {
+            confirmButtonText: '确定',
+            cancelButtonText: '取消',
+            type: 'warning',
+          }
+        ).then(() => {
+          if (treeData.value) {
+            deleteFromNodes(treeData.value)
+            saveTreeData()
+            ElMessage.success('删除成功')
+          }
+        }).catch(() => {
+          // 取消删除
+        })
+      }
+      break
+
+    // 可以添加其他命令的处理...
+    case 'edit':
+    case 'export':
+    case 'truncate':
+      ElMessage.info('功能开发中...')
+      break
   }
+
+  // 关闭右键菜单
+  contextMenuVisible.value = false
 }
 
 // 处理对话框确认
@@ -526,6 +598,49 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
 })
+
+// 处理刷新
+const handleRefresh = async () => {
+  if (selectedNode.value?.type === 'connection') {
+    await loadDatabases(selectedNode.value)
+  } else if (selectedNode.value?.type === 'database') {
+    const parentNode = findParentNodeById(treeData.value, selectedNode.value.id)
+    if (parentNode) {
+      await loadTables(selectedNode.value, parentNode)
+    }
+  }
+}
+
+// 处理新建连接
+const handleNewConnection = () => {
+  dialogType.value = 'connection'
+  dialogTitle.value = '新建连接'
+  connectionForm.value = {
+    type: 'mysql',
+    host: 'localhost',
+    port: 3306,
+    user: '',
+    password: '',
+    database: '',
+    sslMode: 'disable'
+  }
+  dialogVisible.value = true
+}
+
+// 处理新建查询
+const handleNewQuery = () => {
+  if (selectedConnection.value?.config) {
+    emit('new-query', {
+      config: selectedConnection.value.config,
+      database: selectedConnection.value.label
+    })
+  }
+}
+
+// 暴露方法给父组件
+defineExpose({
+  handleContextMenuCommand
+})
 </script>
 
 <style scoped>
@@ -542,6 +657,7 @@ onUnmounted(() => {
   flex: 1;
   overflow: auto;
   padding: 8px;
+  padding-top: 0;
 }
 
 .resize-bar {
@@ -613,5 +729,9 @@ onUnmounted(() => {
 
 :deep(.el-tree-node__expand-icon.is-leaf) {
   color: transparent;
+}
+
+.menu-bar {
+  display: none;
 }
 </style> 

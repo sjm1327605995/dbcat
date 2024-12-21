@@ -1,36 +1,35 @@
 package database
 
 import (
-	"database/sql"
 	"fmt"
-	"time"
-
+	"strings"
+	"database/sql"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 )
 
 // PostgresAdapter PostgreSQL适配器
 type PostgresAdapter struct {
-	config DatabaseConfig
-	db     *sql.DB
+	BaseAdapter
 }
 
 // NewPostgresAdapter 创建PostgreSQL适配器
 func NewPostgresAdapter(config DatabaseConfig) *PostgresAdapter {
-	return &PostgresAdapter{
-		config: config,
+	adapter := &PostgresAdapter{
+		BaseAdapter: BaseAdapter{
+			config: config,
+		},
 	}
+	adapter.SetConnectFunc(adapter.Connect)
+	return adapter
 }
 
 // Connect 连接数据库
 func (a *PostgresAdapter) Connect() error {
-	// 如果已经有连接且连接有效，直接返回
-	if a.db != nil {
-		if err := a.db.Ping(); err == nil {
-			return nil
-		}
-		// 如果连接无效，关闭它
-		a.db.Close()
-		a.db = nil
+	// 创建数据库时连接到默认的 postgres 数据库
+	dbname := "postgres"
+	if a.config.Database != "" {
+		dbname = a.config.Database
 	}
 
 	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
@@ -38,25 +37,17 @@ func (a *PostgresAdapter) Connect() error {
 		a.config.Port,
 		a.config.User,
 		a.config.Password,
-		a.config.Database,
-		a.config.SSLMode)
+		dbname,
+		a.config.SSLMode,
+	)
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sqlx.Connect("postgres", dsn)
 	if err != nil {
 		return err
 	}
 
-	// 设置连接池参数
-	db.SetMaxOpenConns(10)           // 最大打开连接数
-	db.SetMaxIdleConns(5)            // 最大空闲连接数
-	db.SetConnMaxLifetime(time.Hour) // 连接最大生命周期
-
-	if err = db.Ping(); err != nil {
-		db.Close()
-		return err
-	}
-
 	a.db = db
+	a.SetupConnPool()
 	return nil
 }
 
@@ -76,7 +67,7 @@ func (a *PostgresAdapter) GetDatabases() ([]DatabaseInfo, error) {
 		WHERE datistemplate = false 
 		AND datname NOT IN ('postgres', 'template0', 'template1')
 	`
-	rows, err := a.db.Query(query)
+	rows, err := a.db.Queryx(query)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +91,7 @@ func (a *PostgresAdapter) GetSchemas(dbName string) ([]SchemaInfo, error) {
 		FROM information_schema.schemata 
 		WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
 	`
-	rows, err := a.db.Query(query)
+	rows, err := a.db.Queryx(query)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +121,7 @@ func (a *PostgresAdapter) GetTables(dbName, schema string) ([]TableInfo, error) 
 		AND 
 			table_type = 'BASE TABLE'
 	`
-	rows, err := a.db.Query(query, schema)
+	rows, err := a.db.Queryx(query, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +162,7 @@ func (a *PostgresAdapter) GetTableColumns(dbName, tableName string) ([]ColumnInf
 		ORDER BY ordinal_position;
 	`
 
-	rows, err := a.db.Query(query, tableName)
+	rows, err := a.db.Queryx(query, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +193,7 @@ func (a *PostgresAdapter) GetTableRowCount(dbName, tableName string) (int64, err
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)
 
 	var count int64
-	err := a.db.QueryRow(query).Scan(&count)
+	err := a.db.QueryRowx(query).Scan(&count)
 	if err != nil {
 		return 0, err
 	}
@@ -215,7 +206,7 @@ func (a *PostgresAdapter) QueryTableData(dbName, tableName string, offset, limit
 	// 构建查询语句
 	query := fmt.Sprintf("SELECT * FROM %s LIMIT $1 OFFSET $2", tableName)
 
-	rows, err := a.db.Query(query, limit, offset)
+	rows, err := a.db.Queryx(query, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -271,4 +262,122 @@ func (a *PostgresAdapter) Ping() error {
 		return fmt.Errorf("database connection is not initialized")
 	}
 	return a.db.Ping()
+}
+
+// CreateDatabase 创建数据库
+func (a *PostgresAdapter) CreateDatabase(name string, charset string, collation string) error {
+	// 确保连接到 postgres 数据库
+	oldDB := a.config.Database
+	a.config.Database = "postgres"
+	defer func() { a.config.Database = oldDB }()
+
+	db, err := a.DB()
+	if err != nil {
+		return err
+	}
+
+	sql := fmt.Sprintf("CREATE DATABASE \"%s\"", name)
+	if charset != "" {
+		sql += fmt.Sprintf(" ENCODING '%s'", charset)
+	}
+	if collation != "" {
+		sql += fmt.Sprintf(" LC_COLLATE '%s'", collation)
+	}
+
+	_, err = db.Exec(sql)
+	return err
+}
+
+// GetCharsets 获取PostgreSQL支持的字符集和排序规则
+func (a *PostgresAdapter) GetCharsets() ([]CharsetInfo, error) {
+	db, err := a.DB()
+	if err != nil {
+		return []CharsetInfo{}, err
+	}
+
+	query := `
+		SELECT 
+			pg_encoding_to_char(encoding) as name,
+			pg_encoding_to_char(encoding) as description,
+			string_agg(collname, ',') as collations
+		FROM pg_collation
+		GROUP BY encoding
+		ORDER BY name
+	`
+	
+	rows, err := db.Queryx(query)
+	if err != nil {
+		return []CharsetInfo{}, err
+	}
+	defer rows.Close()
+
+	charsets := []CharsetInfo{}
+	for rows.Next() {
+		var charset CharsetInfo
+		var collationsStr string
+		if err := rows.Scan(&charset.Name, &charset.Description, &collationsStr); err != nil {
+			return []CharsetInfo{}, err
+		}
+		if collationsStr != "" {
+			charset.Collations = strings.Split(collationsStr, ",")
+		} else {
+			charset.Collations = []string{}
+		}
+		charsets = append(charsets, charset)
+	}
+
+	if len(charsets) == 0 {
+		// 如果没有找到字符集，返回默认值
+		return []CharsetInfo{
+			{
+				Name:        "UTF8",
+				Description: "Unicode UTF8",
+				Collations:  []string{"default"},
+			},
+		}, nil
+	}
+
+	return charsets, nil
+}
+
+// ExecuteQuery 执行SQL查询
+func (a *PostgresAdapter) ExecuteQuery(dbName, sql string) ([]map[string]string, error) {
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	// 执行查询
+	rows, err := db.Queryx(sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]string
+	for rows.Next() {
+		row := make(map[string]interface{})
+		err := rows.MapScan(row)
+		if err != nil {
+			return nil, err
+		}
+
+		// 转换为字符串map
+		strRow := make(map[string]string)
+		for k, v := range row {
+			if v == nil {
+				strRow[k] = ""
+			} else {
+				switch v := v.(type) {
+				case []byte:
+					strRow[k] = string(v)
+				default:
+					strRow[k] = fmt.Sprintf("%v", v)
+				}
+			}
+		}
+		result = append(result, strRow)
+	}
+
+	return result, nil
 }

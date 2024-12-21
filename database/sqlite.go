@@ -1,56 +1,41 @@
 package database
 
 import (
-	"database/sql"
 	"fmt"
 	"regexp"
 	"strconv"
-	"time"
-
+	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 // SQLiteAdapter SQLite适配器
 type SQLiteAdapter struct {
-	config DatabaseConfig
-	db     *sql.DB
+	BaseAdapter
 }
 
 // NewSQLiteAdapter 创建SQLite适配器
 func NewSQLiteAdapter(config DatabaseConfig) *SQLiteAdapter {
-	return &SQLiteAdapter{
-		config: config,
+	adapter := &SQLiteAdapter{
+		BaseAdapter: BaseAdapter{
+			config: config,
+		},
 	}
+	adapter.SetConnectFunc(adapter.Connect)
+	return adapter
 }
 
 // Connect 连接数据库
 func (a *SQLiteAdapter) Connect() error {
-	// 如果已经有连接且连接有效，直接返回
-	if a.db != nil {
-		if err := a.db.Ping(); err == nil {
-			return nil
-		}
-		// 如果连接无效，关闭它
-		a.db.Close()
-		a.db = nil
-	}
-
-	db, err := sql.Open("sqlite3", a.config.Database)
+	// SQLite 直接使用文件路径
+	db, err := sqlx.Connect("sqlite3", a.config.Database)
 	if err != nil {
 		return err
 	}
 
-	// 设置连接池参数
-	db.SetMaxOpenConns(1) // SQLite 只支持一个连接
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(time.Hour)
-
-	if err = db.Ping(); err != nil {
-		db.Close()
-		return err
-	}
-
 	a.db = db
+	// SQLite 特殊设置：只允许一个连接
+	a.db.SetMaxOpenConns(1)
+	a.SetupConnPool()
 	return nil
 }
 
@@ -74,6 +59,11 @@ func (a *SQLiteAdapter) GetSchemas(dbName string) ([]SchemaInfo, error) {
 
 // GetTables 获取指定schema的所有表
 func (a *SQLiteAdapter) GetTables(dbName, schema string) ([]TableInfo, error) {
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
+
 	query := `
 		SELECT 
 			name,
@@ -85,7 +75,7 @@ func (a *SQLiteAdapter) GetTables(dbName, schema string) ([]TableInfo, error) {
 		AND 
 			name NOT LIKE 'sqlite_%'
 	`
-	rows, err := a.db.Query(query)
+	rows, err := db.Queryx(query)
 	if err != nil {
 		return nil, err
 	}
@@ -102,11 +92,15 @@ func (a *SQLiteAdapter) GetTables(dbName, schema string) ([]TableInfo, error) {
 	return tables, nil
 }
 
-// 添加获取表结构的方法
+// GetTableColumns 获取表结构
 func (a *SQLiteAdapter) GetTableColumns(dbName, tableName string) ([]ColumnInfo, error) {
-	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
 
-	rows, err := a.db.Query(query)
+	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
+	rows, err := db.Queryx(query)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +125,6 @@ func (a *SQLiteAdapter) GetTableColumns(dbName, tableName string) ([]ColumnInfo,
 			IsPrimary: pk == 1,
 		}
 
-		// 解析类型中的长度信息
 		if matches := regexp.MustCompile(`(\w+)\((\d+)\)`).FindStringSubmatch(type_); len(matches) == 3 {
 			col.Type = matches[1]
 			if length, err := strconv.Atoi(matches[2]); err == nil {
@@ -145,12 +138,16 @@ func (a *SQLiteAdapter) GetTableColumns(dbName, tableName string) ([]ColumnInfo,
 	return columns, nil
 }
 
-// 添加获取表行数的方法
+// GetTableRowCount 获取表行数
 func (a *SQLiteAdapter) GetTableRowCount(dbName, tableName string) (int64, error) {
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)
+	db, err := a.DB()
+	if err != nil {
+		return 0, err
+	}
 
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)
 	var count int64
-	err := a.db.QueryRow(query).Scan(&count)
+	err = db.QueryRowx(query).Scan(&count)
 	if err != nil {
 		return 0, err
 	}
@@ -158,56 +155,42 @@ func (a *SQLiteAdapter) GetTableRowCount(dbName, tableName string) (int64, error
 	return count, nil
 }
 
-// 修改查询表数据的方法
+// QueryTableData 查询表数据
 func (a *SQLiteAdapter) QueryTableData(dbName, tableName string, offset, limit int) ([]map[string]string, error) {
-	// 构建查询语句
-	query := fmt.Sprintf("SELECT * FROM %s LIMIT ? OFFSET ?", tableName)
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
 
-	rows, err := a.db.Query(query, limit, offset)
+	query := fmt.Sprintf("SELECT * FROM %s LIMIT ? OFFSET ?", tableName)
+	rows, err := db.Queryx(query, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	// 获取列名
-	colNames, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-
-	// 准备扫描目标
-	values := make([]interface{}, len(colNames))
-	valuePtrs := make([]interface{}, len(colNames))
-	for i := range values {
-		valuePtrs[i] = &values[i]
-	}
-
-	// 读取数据
 	var result []map[string]string
 	for rows.Next() {
-		err := rows.Scan(valuePtrs...)
+		row := make(map[string]interface{})
+		err := rows.MapScan(row)
 		if err != nil {
 			return nil, err
 		}
 
-		// 转换为 map
-		entry := make(map[string]string)
-		for i, col := range colNames {
-			var v string
-			val := values[i]
-			if val == nil {
-				v = ""
+		strRow := make(map[string]string)
+		for k, v := range row {
+			if v == nil {
+				strRow[k] = ""
 			} else {
-				switch val := val.(type) {
+				switch v := v.(type) {
 				case []byte:
-					v = string(val)
+					strRow[k] = string(v)
 				default:
-					v = fmt.Sprintf("%v", val)
+					strRow[k] = fmt.Sprintf("%v", v)
 				}
 			}
-			entry[col] = v
 		}
-		result = append(result, entry)
+		result = append(result, strRow)
 	}
 
 	return result, nil
@@ -219,4 +202,62 @@ func (a *SQLiteAdapter) Ping() error {
 		return fmt.Errorf("database connection is not initialized")
 	}
 	return a.db.Ping()
+}
+
+// CreateDatabase SQLite不需要创建数据库
+func (a *SQLiteAdapter) CreateDatabase(name string, charset string, collation string) error {
+	return nil
+}
+
+// GetCharsets SQLite只支持UTF-8
+func (a *SQLiteAdapter) GetCharsets() ([]CharsetInfo, error) {
+	return []CharsetInfo{
+		{
+			Name:        "UTF-8",
+			Description: "Unicode (UTF-8)",
+			Collations:  []string{"BINARY", "NOCASE", "RTRIM"},
+		},
+	}, nil
+}
+
+// ExecuteQuery 执行SQL查询
+func (a *SQLiteAdapter) ExecuteQuery(dbName, sql string) ([]map[string]string, error) {
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	// 执行查询
+	rows, err := db.Queryx(sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []map[string]string
+	for rows.Next() {
+		row := make(map[string]interface{})
+		err := rows.MapScan(row)
+		if err != nil {
+			return nil, err
+		}
+
+		// 转换为字符串map
+		strRow := make(map[string]string)
+		for k, v := range row {
+			if v == nil {
+				strRow[k] = ""
+			} else {
+				switch v := v.(type) {
+				case []byte:
+					strRow[k] = string(v)
+				default:
+					strRow[k] = fmt.Sprintf("%v", v)
+				}
+			}
+		}
+		result = append(result, strRow)
+	}
+
+	return result, nil
 }

@@ -15,9 +15,10 @@
     "allowJs": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "../../wailsjs/go/main/*": ["./wailsjs/go/main/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue", "wailsjs/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue", "wailsjs/**/*.ts", "wailsjs/**/*.d.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 } 

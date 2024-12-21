@@ -82,20 +82,23 @@
 import { ref, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { DatabaseConfig } from '../types/database'
-import { GetTableStructure, GetTableData } from '../../wailsjs/go/main/App'
+import { GetTableStructure, GetTableData, GetTableRowCount } from '../../wailsjs/go/main/App'
+import type { database } from '../../wailsjs/go/models'
 
-interface ColumnValue {
-  Name: string
-  Value: string
-}
-
-interface RowData {
-  Columns: ColumnValue[]
-}
-
+// 定义接口
 interface TableData {
-  Data: RowData[]
+  Data: Array<{
+    Columns: Array<{
+      Name: string
+      Value: string
+    }>
+  }>
   Total: number
+}
+
+interface TableColumn extends database.ColumnInfo {
+  width?: number
+  align?: string
 }
 
 const props = defineProps<{
@@ -106,7 +109,7 @@ const props = defineProps<{
 
 const loading = ref(false)
 const tableData = ref<Record<string, string>[]>([])
-const columns = ref<any[]>([])
+const columns = ref<TableColumn[]>([])
 const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(1000)
@@ -190,8 +193,11 @@ const loadTableStructure = async () => {
   console.log('Loading table structure:', props)
   try {
     const structure = await GetTableStructure(props.config, props.database, props.table)
-    console.log('Table structure:', structure)
-    columns.value = structure.Columns
+    columns.value = structure.map(col => ({
+      ...col,
+      width: getColumnWidth(col),
+      align: getColumnAlign(col)
+    }))
   } catch (error) {
     console.error('Failed to load table structure:', error)
     ElMessage.error('获取表结构失败: ' + error)
@@ -210,21 +216,18 @@ const loadTableData = async () => {
       (currentPage.value - 1) * pageSize.value,
       pageSize.value
     )
-    console.log('Table data:', result)
+    console.log('Table data result:', result)
+
+    // 直接使用返回的数据，因为后端已经返回了正确格式的 map
+    tableData.value = result || []
     
-    // 将数据转换为表格需要的格式
-    tableData.value = result.Data.map(row => {
-      const record: Record<string, string> = {}
-      row.Columns.forEach(col => {
-        record[col.Name] = col.Value
-      })
-      return record
-    })
-    
-    total.value = result.Total
+    // 获取总行数
+    const count = await GetTableRowCount(props.config, props.database, props.table)
+    total.value = count || 0
+
   } catch (error) {
     console.error('Failed to load table data:', error)
-    ElMessage.error('获取表数据失败: ' + error)
+    ElMessage.error('获取���数据失败: ' + error)
   } finally {
     loading.value = false
   }

@@ -1,79 +1,58 @@
 package database
 
 import (
-	"database/sql"
 	"fmt"
-	"time"
-
+	"github.com/jmoiron/sqlx"
+	"database/sql"
 	_ "github.com/go-sql-driver/mysql"
+	"strings"
 )
 
-// MySQLAdapter MySQL适配器
 type MySQLAdapter struct {
-	config DatabaseConfig
-	db     *sql.DB
+	BaseAdapter
 }
 
-// NewMySQLAdapter 创建MySQL适配器
 func NewMySQLAdapter(config DatabaseConfig) *MySQLAdapter {
-	return &MySQLAdapter{
-		config: config,
+	adapter := &MySQLAdapter{
+		BaseAdapter: BaseAdapter{
+			config: config,
+		},
 	}
+	adapter.SetConnectFunc(adapter.Connect)
+	return adapter
 }
 
-// Connect 连接数据库
 func (a *MySQLAdapter) Connect() error {
-	// 如果已经有连接且连接有效，直接返回
-	if a.db != nil {
-		if err := a.db.Ping(); err == nil {
-			return nil
-		}
-		// 如果连接无效，关闭它
-		a.db.Close()
-		a.db = nil
-	}
-
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s",
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/",
 		a.config.User,
 		a.config.Password,
 		a.config.Host,
 		a.config.Port,
-		a.config.Database,
 	)
 
-	db, err := sql.Open("mysql", dsn)
+	if a.config.Database != "" {
+		dsn += a.config.Database
+	}
+
+	db, err := sqlx.Connect("mysql", dsn)
 	if err != nil {
 		return err
 	}
 
-	// 设置连接池参数
-	db.SetMaxOpenConns(10)                  // 最大连接数
-	db.SetMaxIdleConns(5)                   // 最大空闲连接数
-	db.SetConnMaxLifetime(time.Hour)        // 连接最大生命周期
-	db.SetConnMaxIdleTime(30 * time.Minute) // 空闲连接最大生命周期
-
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return err
-	}
-
 	a.db = db
-	return nil
-}
-
-// Close 关闭连接
-func (a *MySQLAdapter) Close() error {
-	if a.db != nil {
-		err := a.db.Close()
-		a.db = nil
-		return err
-	}
+	a.SetupConnPool()
 	return nil
 }
 
 // GetDatabases 获取所有数据库
 func (a *MySQLAdapter) GetDatabases() ([]DatabaseInfo, error) {
-	rows, err := a.db.Query("SHOW DATABASES")
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	query := "SHOW DATABASES"
+	rows, err := db.Queryx(query)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +78,11 @@ func (a *MySQLAdapter) GetSchemas(dbName string) ([]SchemaInfo, error) {
 
 // GetTables 获取指定schema的所有表
 func (a *MySQLAdapter) GetTables(dbName, schema string) ([]TableInfo, error) {
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
+
 	query := `
 		SELECT 
 			TABLE_NAME,
@@ -108,7 +92,7 @@ func (a *MySQLAdapter) GetTables(dbName, schema string) ([]TableInfo, error) {
 		WHERE 
 			TABLE_SCHEMA = ?
 	`
-	rows, err := a.db.Query(query, dbName)
+	rows, err := db.Queryx(query, dbName)
 	if err != nil {
 		return nil, err
 	}
@@ -128,12 +112,6 @@ func (a *MySQLAdapter) GetTables(dbName, schema string) ([]TableInfo, error) {
 
 // GetTableColumns 获取表结构
 func (a *MySQLAdapter) GetTableColumns(dbName, tableName string) ([]ColumnInfo, error) {
-	if a.db == nil {
-		if err := a.Connect(); err != nil {
-			return nil, err
-		}
-	}
-
 	query := `
 		SELECT 
 			COLUMN_NAME,
@@ -146,7 +124,7 @@ func (a *MySQLAdapter) GetTableColumns(dbName, tableName string) ([]ColumnInfo, 
 		ORDER BY ORDINAL_POSITION
 	`
 
-	rows, err := a.db.Query(query, dbName, tableName)
+	rows, err := a.db.Queryx(query, dbName, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -173,108 +151,193 @@ func (a *MySQLAdapter) GetTableColumns(dbName, tableName string) ([]ColumnInfo, 
 	return columns, nil
 }
 
-// GetTableRowCount 获取表行数（使用近似值以提高性能）
+// GetTableRowCount 获取表行数
 func (a *MySQLAdapter) GetTableRowCount(dbName, tableName string) (int64, error) {
-	if a.db == nil {
-		if err := a.Connect(); err != nil {
-			return 0, err
-		}
-	}
-
-	// 先尝试从 information_schema 获取近似行数
-	query := `
-		SELECT table_rows 
-		FROM information_schema.tables 
-		WHERE table_schema = ? AND table_name = ?
-	`
+	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`", dbName, tableName)
 	var count int64
-	err := a.db.QueryRow(query, dbName, tableName).Scan(&count)
-	if err == nil && count > 0 {
-		return count, nil
-	}
-
-	// 如果获取失败或行数为0，再使用 COUNT(*)
-	query = fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`", dbName, tableName)
-	err = a.db.QueryRow(query).Scan(&count)
-	if err != nil {
-		return 0, err
-	}
-
-	return count, nil
+	err := a.db.Get(&count, query)
+	return count, err
 }
 
 // QueryTableData 查询表数据
 func (a *MySQLAdapter) QueryTableData(dbName, tableName string, offset, limit int) ([]map[string]string, error) {
-	if a.db == nil {
-		if err := a.Connect(); err != nil {
-			return nil, err
-		}
-	}
-
-	// 使用 SQL_CALC_FOUND_ROWS 来优化分页查询
 	query := fmt.Sprintf("SELECT * FROM `%s`.`%s` LIMIT ? OFFSET ?", dbName, tableName)
-
-	rows, err := a.db.Query(query, limit, offset)
+	rows, err := a.db.Queryx(query, limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	// 获取列名
-	colNames, err := rows.Columns()
-	if err != nil {
-		return nil, err
-	}
-
-	// 预分配内存
-	result := make([]map[string]string, 0, limit)
-	values := make([]interface{}, len(colNames))
-	valuePtrs := make([]interface{}, len(colNames))
-
-	// 创建一个可重用的缓冲区
-	for i := range values {
-		valuePtrs[i] = &values[i]
-	}
-
-	// 读取数据
+	var result []map[string]string
 	for rows.Next() {
-		err := rows.Scan(valuePtrs...)
+		row := make(map[string]interface{})
+		err := rows.MapScan(row)
 		if err != nil {
 			return nil, err
 		}
 
-		// 转换为 map
-		entry := make(map[string]string, len(colNames))
-		for i, col := range colNames {
-			var v string
-			val := values[i]
-			if val == nil {
-				v = ""
+		// 转换字符串map
+		strRow := make(map[string]string)
+		for k, v := range row {
+			if v == nil {
+				strRow[k] = ""
 			} else {
-				switch val := val.(type) {
+				switch v := v.(type) {
 				case []byte:
-					v = string(val)
+					strRow[k] = string(v)
 				default:
-					v = fmt.Sprintf("%v", val)
+					strRow[k] = fmt.Sprintf("%v", v)
 				}
 			}
-			entry[col] = v
 		}
-		result = append(result, entry)
-	}
-
-	// 检查是否有错误发生
-	if err = rows.Err(); err != nil {
-		return nil, err
+		result = append(result, strRow)
 	}
 
 	return result, nil
 }
 
-// Ping 测试连接是否有效
-func (a *MySQLAdapter) Ping() error {
-	if a.db == nil {
-		return fmt.Errorf("database connection is not initialized")
+// CreateDatabase 创建数据库
+func (a *MySQLAdapter) CreateDatabase(name string, charset string, collation string) error {
+	// 确保连接到服务器而不是具体数据库
+	oldDB := a.config.Database
+	a.config.Database = ""
+	defer func() { a.config.Database = oldDB }()
+
+	db, err := a.DB()
+	if err != nil {
+		return err
 	}
-	return a.db.Ping()
+
+	sql := fmt.Sprintf("CREATE DATABASE `%s`", name)
+	if charset != "" {
+		sql += fmt.Sprintf(" CHARACTER SET %s", charset)
+	}
+	if collation != "" {
+		sql += fmt.Sprintf(" COLLATE %s", collation)
+	}
+
+	_, err = db.Exec(sql)
+	return err
 }
+
+// GetCharsets 获取字符集
+func (a *MySQLAdapter) GetCharsets() ([]CharsetInfo, error) {
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	query := `
+		SELECT 
+			c.CHARACTER_SET_NAME as name,
+			c.DESCRIPTION as description,
+			GROUP_CONCAT(co.COLLATION_NAME) as collations
+		FROM information_schema.CHARACTER_SETS c
+		JOIN information_schema.COLLATIONS co 
+			ON co.CHARACTER_SET_NAME = c.CHARACTER_SET_NAME
+		GROUP BY c.CHARACTER_SET_NAME, c.DESCRIPTION
+		ORDER BY c.CHARACTER_SET_NAME
+	`
+	
+	rows, err := db.Queryx(query)
+	if err != nil {
+		return []CharsetInfo{}, err
+	}
+	defer rows.Close()
+
+	charsets := []CharsetInfo{}
+	for rows.Next() {
+		var charset CharsetInfo
+		var collationsStr string
+		if err := rows.Scan(&charset.Name, &charset.Description, &collationsStr); err != nil {
+			return []CharsetInfo{}, err
+		}
+		if collationsStr != "" {
+			charset.Collations = strings.Split(collationsStr, ",")
+		} else {
+			charset.Collations = []string{}
+		}
+		charsets = append(charsets, charset)
+	}
+
+	if len(charsets) == 0 {
+		return []CharsetInfo{
+			{
+				Name:        "utf8mb4",
+				Description: "UTF-8 Unicode",
+				Collations:  []string{"utf8mb4_general_ci", "utf8mb4_unicode_ci"},
+			},
+		}, nil
+	}
+
+	return charsets, nil
+}
+
+// ExecuteQuery 执行SQL查询
+func (a *MySQLAdapter) ExecuteQuery(dbName, sql string) ([]map[string]string, error) {
+	db, err := a.DB()
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果指定了数据库，先切换到该数据库
+	if dbName != "" {
+		if _, err := db.Exec("USE " + dbName); err != nil {
+			return nil, err
+		}
+	}
+
+	// 清理SQL语句
+	helper := &SQLHelper{}
+	statements := helper.SplitStatements(sql)
+	if len(statements) == 0 {
+		return nil, fmt.Errorf("no valid SQL statements found")
+	}
+
+	// 执行每个语句，返回最后一个 SELECT 语句的结果
+	var result []map[string]string
+	for i, stmt := range statements {
+		// 检查是否是 SELECT 语句
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(stmt)), "SELECT") {
+			// 执行查询并获取结果
+			rows, err := db.Queryx(stmt)
+			if err != nil {
+				return nil, fmt.Errorf("error executing statement %d: %v", i+1, err)
+			}
+			defer rows.Close()
+
+			result = []map[string]string{} // 清空之前的结果
+			for rows.Next() {
+				row := make(map[string]interface{})
+				err := rows.MapScan(row)
+				if err != nil {
+					return nil, err
+				}
+
+				strRow := make(map[string]string)
+				for k, v := range row {
+					if v == nil {
+						strRow[k] = ""
+					} else {
+						switch v := v.(type) {
+						case []byte:
+							strRow[k] = string(v)
+						default:
+							strRow[k] = fmt.Sprintf("%v", v)
+						}
+					}
+				}
+				result = append(result, strRow)
+			}
+		} else {
+			// 执行非 SELECT 语句
+			if _, err := db.Exec(stmt); err != nil {
+				return nil, fmt.Errorf("error executing statement %d: %v", i+1, err)
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// ... 其他方法类似修改
