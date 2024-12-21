@@ -1,5 +1,13 @@
-
-## English
+<div align="center">
+  <h1>DBCat 数据库管理工具</h1>
+  
+  <p>
+    <a href="README.md">English</a> | 
+    <a href="README_ZH.md">中文</a>
+  </p>
+  
+  ![DBCat 截图](docs/images/image.png)
+</div>
 
 DBCat is a lightweight cross-platform database management tool built with Go + Vue3.
 
