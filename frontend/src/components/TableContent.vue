@@ -4,7 +4,7 @@
       v-loading="loading"
       :data="tableData"
       style="width: 100%"
-      height="calc(100vh - 120px)"
+      height="calc(100vh - 180px)"
       :header-cell-style="{
         background: '#f6f8fa',
         borderColor: '#d0d7de',
@@ -30,50 +30,83 @@
         :align="getColumnAlign(column)"
       >
         <template #default="scope">
-          <!-- 日期时间类型 -->
-          <el-date-picker
-            v-if="isDateTime(column.Type) && scope.row[column.Name] !== ''"
-            v-model="scope.row[column.Name]"
-            :type="getDatePickerType(column.Type)"
-            :format="getDateFormat(column.Type)"
-            :value-format="getDateFormat(column.Type)"
-            disabled
-            size="small"
-            class="github-date-picker"
-          />
-          <!-- NULL 值 -->
-          <span
-            v-else-if="scope.row[column.Name] === ''"
-            class="null-value"
-          >
-            NULL
-          </span>
-          <!-- 其他类型 -->
-          <span
-            v-else
-            :class="{
-              'primary-key': column.IsPrimary,
-              'number-value': isNumberType(column.Type)
-            }"
-          >
-            {{ scope.row[column.Name] }}
-          </span>
+          <template v-if="isEditing">
+            <el-input
+              v-if="!isDateTime(column.Type)"
+              v-model="scope.row[column.Name]"
+              size="small"
+            />
+            <el-date-picker
+              v-else
+              v-model="scope.row[column.Name]"
+              :type="getDatePickerType(column.Type)"
+              :format="getDateFormat(column.Type)"
+              :value-format="getDateFormat(column.Type)"
+              size="small"
+            />
+          </template>
+          <template v-else>
+            <el-date-picker
+              v-if="isDateTime(column.Type) && scope.row[column.Name] !== ''"
+              v-model="scope.row[column.Name]"
+              :type="getDatePickerType(column.Type)"
+              :format="getDateFormat(column.Type)"
+              :value-format="getDateFormat(column.Type)"
+              disabled
+              size="small"
+              class="github-date-picker"
+            />
+            <span
+              v-else-if="scope.row[column.Name] === ''"
+              class="null-value"
+            >
+              NULL
+            </span>
+            <span
+              v-else
+              :class="{
+                'primary-key': column.IsPrimary,
+                'number-value': isNumberType(column.Type)
+              }"
+            >
+              {{ scope.row[column.Name] }}
+            </span>
+          </template>
         </template>
       </el-table-column>
     </el-table>
 
-    <div class="pagination-container">
-      <el-pagination
-        v-model:current-page="currentPage"
-        v-model:page-size="pageSize"
-        :page-sizes="[100, 500, 1000, 2000]"
-        :total="total"
-        layout="total, sizes, prev, pager, next, jumper"
-        background
-        class="github-pagination"
-        @size-change="handleSizeChange"
-        @current-change="handleCurrentChange"
-      />
+    <div class="bottom-toolbar">
+      <div class="edit-buttons">
+        <el-button
+          v-if="!isEditing"
+          type="primary"
+          @click="startEdit"
+          :disabled="loading"
+        >
+          编辑数据
+        </el-button>
+        <template v-else>
+          <el-button @click="cancelEdit">放弃编辑</el-button>
+          <el-button type="primary" @click="submitEdit" :loading="saving">
+            提交更改
+          </el-button>
+        </template>
+      </div>
+
+      <div class="pagination">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :page-sizes="[100, 500, 1000, 2000]"
+          :total="total"
+          layout="total, sizes, prev, pager, next, jumper"
+          background
+          class="github-pagination"
+          @size-change="handleSizeChange"
+          @current-change="handleCurrentChange"
+        />
+      </div>
     </div>
   </div>
 </template>
@@ -113,6 +146,40 @@ const columns = ref<TableColumn[]>([])
 const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(1000)
+
+// 添加编辑状态
+const isEditing = ref(false)
+const saving = ref(false)
+const originalData = ref<any[]>([])
+
+// 开始编辑
+const startEdit = () => {
+  // 保存原始数据的深拷贝
+  originalData.value = JSON.parse(JSON.stringify(tableData.value))
+  isEditing.value = true
+}
+
+// 取消编辑
+const cancelEdit = () => {
+  // 恢复原始数据
+  tableData.value = JSON.parse(JSON.stringify(originalData.value))
+  isEditing.value = false
+}
+
+// 提交编辑
+const submitEdit = async () => {
+  try {
+    saving.value = true
+    // TODO: 实现保存逻辑
+    // await SaveTableData(props.config, props.database, props.table, tableData.value)
+    isEditing.value = false
+    ElMessage.success('保存成功')
+  } catch (error) {
+    ElMessage.error('保存失败: ' + error)
+  } finally {
+    saving.value = false
+  }
+}
 
 // 判断是否为日期时间类型
 const isDateTime = (type: string): boolean => {
@@ -227,7 +294,7 @@ const loadTableData = async () => {
 
   } catch (error) {
     console.error('Failed to load table data:', error)
-    ElMessage.error('获取���数据失败: ' + error)
+    ElMessage.error('获取数据失败: ' + error)
   } finally {
     loading.value = false
   }
@@ -350,5 +417,36 @@ watch(
       color: #ffffff;
     }
   }
+}
+
+.bottom-toolbar {
+  padding: 16px;
+  background: #ffffff;
+  border-top: 1px solid #d0d7de;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.edit-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.pagination {
+  flex: 1;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 编辑模式下的输入框样式 */
+:deep(.el-input__inner) {
+  padding: 0 8px;
+  height: 28px;
+  line-height: 28px;
+}
+
+:deep(.el-input__wrapper) {
+  padding: 0;
 }
 </style> 
